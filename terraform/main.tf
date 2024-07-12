@@ -1,22 +1,25 @@
-/* 
-Name: IAC Buildout for Terraform Associate Exam
+/*
+Name: IaC Buildout for Terraform Associate Exam
 Description: AWS Infrastructure Buildout
+Contributors: Bryan and Gabe
 */
 
-# Configure the AWS Provider
 provider "aws" {
   region = "us-east-1"
+  default_tags {
+    tags = {
+      Environment = terraform.workspace
+      Owner       = "TF Hands On Lab"
+      Project     = "Infrastructure as Code"
+      Terraform   = "true"
+    }
+  }
 }
+
 
 #Retrieve the list of AZs in the current AWS region
 data "aws_availability_zones" "available" {}
 data "aws_region" "current" {}
-
-locals {
-  team        = "api_mgmt_dev"
-  application = "corp_api"
-  server_name = "ec2-${var.environment}-api-${var.variables_sub_az}"
-}
 
 #Define the VPC
 resource "aws_vpc" "vpc" {
@@ -26,7 +29,6 @@ resource "aws_vpc" "vpc" {
     Name        = var.vpc_name
     Environment = "demo_environment"
     Terraform   = "true"
-    Region      = data.aws_region.current.name
   }
 }
 
@@ -134,7 +136,7 @@ data "aws_ami" "ubuntu" {
 
   filter {
     name   = "name"
-    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+    values = ["ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*"]
   }
 
   filter {
@@ -147,51 +149,78 @@ data "aws_ami" "ubuntu" {
 
 # Terraform Resource Block - To Build EC2 instance in Public Subnet
 resource "aws_instance" "web_server" {
-  ami                         = data.aws_ami.ubuntu.id
-  instance_type               = "t2.micro"
-  subnet_id                   = aws_subnet.public_subnets["public_subnet_1"].id
-  security_groups             = [aws_security_group.vpc-ping.id, aws_security_group.ingress-ssh.id, aws_security_group.vpc-web.id]
-  associate_public_ip_address = true
-  key_name                    = aws_key_pair.generated.key_name
+  ami             = data.aws_ami.ubuntu.id
+  instance_type   = "t2.micro"
+  subnet_id       = aws_subnet.public_subnets["public_subnet_1"].id
+  security_groups = [aws_security_group.vpc-ping.id, aws_security_group.ingress-ssh.id, aws_security_group.vpc-web.id]
+  key_name        = aws_key_pair.generated.key_name
   connection {
     user        = "ubuntu"
     private_key = tls_private_key.generated.private_key_pem
     host        = self.public_ip
   }
+  associate_public_ip_address = true
+  tags = {
+    Name = "Web EC2 Server"
+  }
 
-  # Leave the first part of the block unchanged and create our `local-exec` provisioner
   provisioner "local-exec" {
     command = "chmod 600 ${local_file.private_key_pem.filename}"
   }
 
   provisioner "remote-exec" {
     inline = [
-      "sudo rm -rf /tmp",
-      "sudo git clone https://github.com/hashicorp/demo-terraform-101 /tmp",
+      "git clone https://github.com/hashicorp/demo-terraform-101",
+      "cp -a demo-terraform-101/. /tmp/",
       "sudo sh /tmp/assets/setup-web.sh",
     ]
   }
-
-  tags = {
-    Name = "Ubuntu EC2 Server"
-  }
-
-  lifecycle {
-    ignore_changes = [security_groups]
-  }
-
 }
 
-resource "aws_subnet" "variables-subnet" {
-  vpc_id                  = aws_vpc.vpc.id
-  cidr_block              = var.variables_sub_cidr
-  availability_zone       = var.variables_sub_az
-  map_public_ip_on_launch = var.variables_sub_auto_ip
-
-  tags = {
-    Name      = "sub-variables-${var.variables_sub_az}"
-    Terraform = "true"
+# Terraform Resource Block - Security Group to Allow Ping Traffic
+resource "aws_security_group" "vpc-ping" {
+  name        = "vpc-ping"
+  vpc_id      = aws_vpc.vpc.id
+  description = "ICMP for Ping Access"
+  ingress {
+    description = "Allow ICMP Traffic"
+    from_port   = -1
+    to_port     = -1
+    protocol    = "icmp"
+    cidr_blocks = ["0.0.0.0/0"]
   }
+  egress {
+    description = "Allow all ip and ports outboun"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# Terraform Data Block - Lookup Ubuntu 22.04
+data "aws_ami" "ubuntu_22_04" {
+  most_recent = true
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  owners = ["099720109477"]
+}
+
+data "aws_ami" "windows_2019" {
+  most_recent = true
+  filter {
+    name   = "name"
+    values = ["Windows_Server-2019-English-Full-Base-*"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+  owners = ["801119661308"] # Canonical
 }
 
 resource "tls_private_key" "generated" {
@@ -264,22 +293,62 @@ resource "aws_security_group" "vpc-web" {
   }
 }
 
-resource "aws_security_group" "vpc-ping" {
-  name        = "vpc-ping"
-  vpc_id      = aws_vpc.vpc.id
-  description = "ICMP for Ping Access"
-  ingress {
-    description = "Allow ICMP Traffic"
-    from_port   = -1
-    to_port     = -1
-    protocol    = "icmp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    description = "Allow all ip and ports outboun"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+module "server" {
+  source          = "./modules/server"
+  ami             = data.aws_ami.ubuntu.id
+  subnet_id       = aws_subnet.public_subnets["public_subnet_3"].id
+  security_groups = [aws_security_group.vpc-ping.id, 
+  aws_security_group.ingress-ssh.id, 
+  aws_security_group.vpc-web.id]
+}
+
+module "server_subnet_1" {
+  source          = "./modules/web_server"
+  ami             = data.aws_ami.ubuntu.id
+  key_name        = aws_key_pair.generated.key_name
+  user            = "ubuntu"
+  private_key     = tls_private_key.generated.private_key_pem
+  subnet_id       = aws_subnet.public_subnets["public_subnet_1"].id
+  security_groups = [aws_security_group.vpc-ping.id, 
+  aws_security_group.ingress-ssh.id, 
+  aws_security_group.vpc-web.id]
+}
+
+output "public_ip" {
+  value = module.server.public_ip
+}
+
+output "public_dns" {
+  value = module.server.public_dns
+}
+
+output "public_ip_server_subnet_1" {
+  value = module.server.public_ip
+}
+
+output "public_dns_server_subnet_1" {
+  value = module.server.public_dns
+}
+
+module "autoscaling" {
+  source  = "terraform-aws-modules/autoscaling/aws"
+  version = "4.9.0"
+
+  # Autoscaling group
+  name = "myasg"
+
+  vpc_zone_identifier = [aws_subnet.private_subnets["private_subnet_1"].id, 
+  aws_subnet.private_subnets["private_subnet_2"].id, 
+  aws_subnet.private_subnets["private_subnet_3"].id]
+  min_size            = 0
+  max_size            = 1
+  desired_capacity    = 1
+
+  # Launch template
+  use_lt    = true
+  create_lt = true
+
+  image_id      = data.aws_ami.ubuntu.id
+  instance_type = "t3.micro"
+
 }
