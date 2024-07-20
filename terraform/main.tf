@@ -16,10 +16,55 @@ provider "aws" {
   }
 }
 
+locals {
+  team        = "api_mgmt_dev"
+  application = "corp_api"
+  server_name = "ec2-${var.environment}-api-${var.variables_sub_az}"
+}
+
+locals {
+  service_name = "Automation"
+  app_team     = "Cloud Team"
+  createdby    = "terraform"
+}
+
+locals {
+  # Common tags to be assigned to all resources
+  common_tags = {
+    Name      = local.server_name
+    Owner     = local.team
+    App       = local.application
+    Service   = local.service_name
+    AppTeam   = local.app_team
+    CreatedBy = local.createdby
+  }
+}
 
 #Retrieve the list of AZs in the current AWS region
 data "aws_availability_zones" "available" {}
 data "aws_region" "current" {}
+
+data "aws_s3_bucket" "data_bucket" {
+  bucket = "ikhalil-mydatalookup"
+}
+
+resource "aws_iam_policy" "policy" {
+  name        = "data_bucket_policy"
+  description = "Allow access to my bucket"
+  policy = jsonencode({
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:Get*",
+                "s3:List*"
+            ],
+            "Resource": "${data.aws_s3_bucket.data_bucket.arn}"
+        }
+    ]
+  })
+}
 
 #Define the VPC
 resource "aws_vpc" "vpc" {
@@ -32,17 +77,24 @@ resource "aws_vpc" "vpc" {
   }
 }
 
+resource "aws_subnet" "variables-subnet" {
+  vpc_id                  = aws_vpc.vpc.id
+  cidr_block              = var.variables_sub_cidr
+  availability_zone       = var.variables_sub_az
+  map_public_ip_on_launch = var.variables_sub_auto_ip
+
+  tags = {
+    Name      = "sub-variables-${var.variables_sub_az}"
+    Terraform = "true"
+  }
+}
+
 #Deploy the private subnets
 resource "aws_subnet" "private_subnets" {
   for_each          = var.private_subnets
   vpc_id            = aws_vpc.vpc.id
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, each.value)
   availability_zone = tolist(data.aws_availability_zones.available.names)[each.value]
-
-  tags = {
-    Name      = each.key
-    Terraform = "true"
-  }
 }
 
 #Deploy the public subnets
@@ -149,24 +201,23 @@ data "aws_ami" "ubuntu" {
 
 # Terraform Resource Block - To Build EC2 instance in Public Subnet
 resource "aws_instance" "web_server" {
-  ami             = data.aws_ami.ubuntu.id
-  instance_type   = "t2.micro"
-  subnet_id       = aws_subnet.public_subnets["public_subnet_1"].id
-  security_groups = [aws_security_group.vpc-ping.id, aws_security_group.ingress-ssh.id, aws_security_group.vpc-web.id]
-  key_name        = aws_key_pair.generated.key_name
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = "t2.micro"
+  subnet_id              = aws_subnet.public_subnets["public_subnet_1"].id
+  vpc_security_group_ids = [aws_security_group.vpc-ping.id]
+  # security_groups = [aws_security_group.vpc-ping.id, aws_security_group.ingress-ssh.id, aws_security_group.vpc-web.id]
+  key_name = aws_key_pair.generated.key_name
   connection {
     user        = "ubuntu"
     private_key = tls_private_key.generated.private_key_pem
     host        = self.public_ip
   }
   associate_public_ip_address = true
-  tags = {
-    Name = "Web EC2 Server"
-  }
+  tags                        = local.common_tags
 
-  provisioner "local-exec" {
-    command = "chmod 600 ${local_file.private_key_pem.filename}"
-  }
+  # provisioner "local-exec" {
+  #   command = "chmod 600 ${local_file.private_key_pem.filename}"
+  # }
 
   provisioner "remote-exec" {
     inline = [
@@ -227,10 +278,10 @@ resource "tls_private_key" "generated" {
   algorithm = "RSA"
 }
 
-resource "local_file" "private_key_pem" {
-  content  = tls_private_key.generated.private_key_pem
-  filename = "MyAWSKey.pem"
-}
+# resource "local_file" "private_key_pem" {
+#   content  = tls_private_key.generated.private_key_pem
+#   filename = "MyAWSKey.pem"
+# }
 
 resource "aws_key_pair" "generated" {
   key_name   = "MyAWSKey"
@@ -293,62 +344,59 @@ resource "aws_security_group" "vpc-web" {
   }
 }
 
-module "server" {
-  source          = "./modules/server"
-  ami             = data.aws_ami.ubuntu.id
-  subnet_id       = aws_subnet.public_subnets["public_subnet_3"].id
-  security_groups = [aws_security_group.vpc-ping.id, 
-  aws_security_group.ingress-ssh.id, 
-  aws_security_group.vpc-web.id]
+# resource "aws_subnet" "list_subnet" {
+#   for_each = var.ip
+#   vpc_id            = aws_vpc.vpc.id
+#   cidr_block        = each.value
+#   availability_zone = var.us-east-1-azs[0]
+# }
+
+resource "aws_subnet" "list_subnet" {
+  for_each          = var.env
+  vpc_id            = aws_vpc.vpc.id
+  cidr_block        = each.value.ip
+  availability_zone = each.value.az
 }
 
-module "server_subnet_1" {
-  source          = "./modules/web_server"
-  ami             = data.aws_ami.ubuntu.id
-  key_name        = aws_key_pair.generated.key_name
-  user            = "ubuntu"
-  private_key     = tls_private_key.generated.private_key_pem
-  subnet_id       = aws_subnet.public_subnets["public_subnet_1"].id
-  security_groups = [aws_security_group.vpc-ping.id, 
-  aws_security_group.ingress-ssh.id, 
-  aws_security_group.vpc-web.id]
-}
+# output "phone_number" {
+#   value     = var.phone_number
+#   sensitive = true
+# }
 
-output "public_ip" {
-  value = module.server.public_ip
-}
+# module "server" {
+#   source    = "./modules/server"
+#   ami       = data.aws_ami.ubuntu.id
+#   size      = "t2.micro"
+#   subnet_id = aws_subnet.public_subnets["public_subnet_3"].id
+#   security_groups = [aws_security_group.vpc-ping.id,
+#     aws_security_group.ingress-ssh.id,
+#   aws_security_group.vpc-web.id]
+# }
 
-output "public_dns" {
-  value = module.server.public_dns
-}
+# module "server_subnet_1" {
+#   source      = "./modules/web_server"
+#   ami         = data.aws_ami.ubuntu.id
+#   key_name    = aws_key_pair.generated.key_name
+#   user        = "ubuntu"
+#   private_key = tls_private_key.generated.private_key_pem
+#   subnet_id   = aws_subnet.public_subnets["public_subnet_1"].id
+#   security_groups = [aws_security_group.vpc-ping.id,
+#     aws_security_group.ingress-ssh.id,
+#   aws_security_group.vpc-web.id]
+# }
 
-output "public_ip_server_subnet_1" {
-  value = module.server.public_ip
-}
+# output "public_dns" {
+#   value = module.server.public_dns
+# }
 
-output "public_dns_server_subnet_1" {
-  value = module.server.public_dns
-}
+# output "size" {
+#   value = module.server.size
+# }
 
-module "autoscaling" {
-  source  = "terraform-aws-modules/autoscaling/aws"
-  version = "4.9.0"
+# output "public_ip_server_subnet_1" {
+#   value = module.server_subnet_1.public_ip
+# }
 
-  # Autoscaling group
-  name = "myasg"
-
-  vpc_zone_identifier = [aws_subnet.private_subnets["private_subnet_1"].id, 
-  aws_subnet.private_subnets["private_subnet_2"].id, 
-  aws_subnet.private_subnets["private_subnet_3"].id]
-  min_size            = 0
-  max_size            = 1
-  desired_capacity    = 1
-
-  # Launch template
-  use_lt    = true
-  create_lt = true
-
-  image_id      = data.aws_ami.ubuntu.id
-  instance_type = "t3.micro"
-
-}
+# output "public_dns_server_subnet_1" {
+#   value = module.server_subnet_1.public_dns
+# }
